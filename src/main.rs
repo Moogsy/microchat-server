@@ -12,6 +12,9 @@ type PeerMap = HashMap<SocketAddr, MessageSender>;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    env_logger::builder()
+        .filter(None, log::LevelFilter::Info)
+        .init();
 
     let state = Arc::new(Mutex::new(PeerMap::new()));
     let listener = TcpListener::bind(ADDR).await?;
@@ -56,8 +59,12 @@ async fn handle_connection(
 
     let (outgoing, incoming) = ws_stream.split();
 
-    let broadcast_incoming = incoming.try_for_each_concurrent(None, |msg| {
-        log::info!("Received a message from {address}: {}", msg.to_string());
+    let broadcast_incoming = incoming.try_for_each(|msg| {
+        {
+            let escaped = msg.to_string().replace('\n', "\\n");
+            let msg = format!("Received a message from {address}: {escaped}");
+            log::info!("{}", msg);
+        }
 
         let peers = state.lock().unwrap();
         let broadcast_recipients = peers
@@ -65,9 +72,11 @@ async fn handle_connection(
             .filter(|(peer_addr, _)| **peer_addr != address)
             .map(|(_, ws_sink)| ws_sink);
 
+        let to_send = format!("[{address}] {msg}");
+
         for sender in broadcast_recipients {
-            if let Err(err) = sender.unbounded_send(msg.clone()) {
-                eprintln!("Failed to broadcast message from {address}: {err}");
+            if let Err(err) = sender.unbounded_send(to_send.clone().into()) {
+                log::warn!("Failed to broadcast message from {address}: {err}");
             };
         }
 
@@ -78,8 +87,6 @@ async fn handle_connection(
     pin_mut!(broadcast_incoming, receive_from_others);
 
     future::select(broadcast_incoming, receive_from_others).await;
-
-    println!("{address} disconnected");
     state.lock().unwrap().remove(&address);
 
     Ok(())
